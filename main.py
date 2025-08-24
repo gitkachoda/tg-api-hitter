@@ -5,7 +5,7 @@ import aiohttp
 import random
 from datetime import datetime
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -14,12 +14,15 @@ from telegram.ext import (
     filters,
 )
 from threading import Timer
+from flask import Flask, request, jsonify
 
 # ------------------- Load Environment -------------------
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN missing in environment")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # https://your-render-url.com/webhook
+PORT = int(os.environ.get("PORT", 5000))
+if not BOT_TOKEN or not WEBHOOK_URL:
+    raise RuntimeError("BOT_TOKEN or WEBHOOK_URL missing in environment")
 
 # ------------------- Globals -------------------
 BASE_URL = None
@@ -182,7 +185,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         if os.path.exists(local_file): os.remove(local_file)
 
-# ------------------- Build & Run -------------------
+# ------------------- Build App -------------------
 def build_app():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -192,7 +195,20 @@ def build_app():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, set_baseurl_input))
     return app
 
+# ------------------- Flask Webhook Server -------------------
+flask_app = Flask(__name__)
+application = build_app()
+bot_instance = Bot(BOT_TOKEN)
+
+@flask_app.route("/webhook", methods=["POST"])
+def webhook():
+    data = request.get_json(force=True)
+    update = Update.de_json(data, bot_instance)
+    asyncio.run(application.update_queue.put(update))
+    return jsonify({"status": "ok"})
+
 if __name__ == "__main__":
-    application = build_app()
-    print("[INFO] Bot running in polling mode (Render worker friendly)")
-    application.run_polling(drop_pending_updates=True)
+    # Set webhook with Telegram
+    bot_instance.set_webhook(url=WEBHOOK_URL)
+    print(f"[INFO] Webhook set to {WEBHOOK_URL}")
+    flask_app.run(host="0.0.0.0", port=PORT)
