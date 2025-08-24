@@ -1,5 +1,4 @@
 import os
-import json
 import tempfile
 import asyncio
 import aiohttp
@@ -19,7 +18,6 @@ from threading import Timer
 # ------------------- Load Environment -------------------
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PORT = int(os.environ.get("PORT", 5000))  # Render port
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN missing in environment")
 
@@ -44,7 +42,7 @@ def get_greeting():
 def schedule_delete(chat_id: int, message_id: int):
     def delete_msg():
         try:
-            if application is not None:
+            if application:
                 asyncio.run(application.bot.delete_message(chat_id=chat_id, message_id=message_id))
         except Exception:
             pass
@@ -84,11 +82,10 @@ async def download_video_with_progress(msg_processing, url, local_file: str):
                             now = loop.time()
                             if now >= next_edit_at:
                                 try:
-                                    if total_size>0 and percent is not None:
-                                        if percent != last_percent:
-                                            await msg_processing.edit_text(f"⏳ Downloading... {percent}%")
-                                            last_percent = percent
-                                    else:
+                                    if total_size>0 and percent != last_percent:
+                                        await msg_processing.edit_text(f"⏳ Downloading... {percent}%")
+                                        last_percent = percent
+                                    elif total_size==0:
                                         await msg_processing.edit_text(f"⏳ Downloading... {human_size(downloaded)}")
                                 except Exception: pass
                                 next_edit_at = now + random.uniform(30,35)
@@ -138,7 +135,7 @@ async def stop_baseurl(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BASE_URL
-    if update.message is None or update.message.text is None:
+    if not update.message or not update.message.text:
         return
     link = update.message.text.strip()
     if not BASE_URL:
@@ -197,5 +194,5 @@ def build_app():
 
 if __name__ == "__main__":
     application = build_app()
-    print("[INFO] Bot running in polling mode (Render friendly)")
+    print("[INFO] Bot running in polling mode (Render worker friendly)")
     application.run_polling(drop_pending_updates=True)
