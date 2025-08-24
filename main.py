@@ -22,7 +22,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.environ.get("PORT", 5000))
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://your-domain.com
-URL_PATH = os.getenv("URL_PATH")  # optional, secure random default below
+URL_PATH = os.getenv("URL_PATH")  # optional
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN missing in environment")
@@ -209,7 +209,9 @@ def build_app():
 
 if __name__ == "__main__":
     application = build_app()
+
     if WEBHOOK_URL:
+        # Webhook mode
         application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
@@ -218,4 +220,6 @@ if __name__ == "__main__":
             drop_pending_updates=True
         )
     else:
+        # Polling mode (ensure webhook deleted before using polling)
+        print("[INFO] Running in polling mode. Make sure webhook is deleted first!")
         application.run_polling(drop_pending_updates=True)
