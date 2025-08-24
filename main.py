@@ -5,7 +5,7 @@ import aiohttp
 import random
 from datetime import datetime
 from dotenv import load_dotenv
-from telegram import Update, Bot
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -13,23 +13,17 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from threading import Timer
-from flask import Flask, request, jsonify
-import requests
 
 # ------------------- Load Environment -------------------
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # https://your-render-url.com/webhook
-PORT = int(os.environ.get("PORT", 5000))
-if not BOT_TOKEN or not WEBHOOK_URL:
-    raise RuntimeError("BOT_TOKEN or WEBHOOK_URL missing in environment")
+BOT_TOKEN ="8382857845:AAFYydnwKLfUeytMEv54-zGVbddMAOKzLnE"
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN missing in environment")
 
 # ------------------- Globals -------------------
 BASE_URL = None
 FIRST_TIME_USERS = set()
 AWAITING_BASEURL = set()
-application = None
 
 # ------------------- Utility Functions -------------------
 def get_greeting():
@@ -43,12 +37,14 @@ def get_greeting():
     else:
         return "Good Night 🌙"
 
-def schedule_delete(chat_id: int, message_id: int):
+def schedule_delete(chat_id: int, message_id: int, bot):
+    from threading import Timer
     def delete_msg():
         try:
-            if application:
-                loop = asyncio.get_event_loop()
-                loop.create_task(application.bot.delete_message(chat_id=chat_id, message_id=message_id))
+            asyncio.run_coroutine_threadsafe(
+                bot.delete_message(chat_id=chat_id, message_id=message_id),
+                asyncio.get_event_loop()
+            )
         except Exception:
             pass
     Timer(24*60*60, delete_msg).start()
@@ -180,42 +176,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         with open(local_file,"rb") as f:
             sent = await update.message.reply_video(video=f, caption=f"{name} ({size_str})")
-        schedule_delete(update.effective_chat.id, sent.message_id)
+        schedule_delete(update.effective_chat.id, sent.message_id, context.bot)
         await msg_processing.delete()
     except Exception as e:
         await msg_processing.edit_text(f"❌ Upload failed: {e}")
     finally:
         if os.path.exists(local_file): os.remove(local_file)
 
-# ------------------- Build App -------------------
-def build_app():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("baseurl", baseurl_prompt))
-    app.add_handler(CommandHandler("stop", stop_baseurl))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, set_baseurl_input))
-    return app
+# ------------------- Build Application -------------------
+def build_application():
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("status", status))
+    application.add_handler(CommandHandler("baseurl", baseurl_prompt))
+    application.add_handler(CommandHandler("stop", stop_baseurl))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, set_baseurl_input))
+    return application
 
-# ------------------- Flask Webhook Server -------------------
-flask_app = Flask(__name__)
-application = build_app()
-bot_instance = Bot(BOT_TOKEN)
-
-@flask_app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.get_json(force=True)
-    update = Update.de_json(data, bot_instance)
-    # Use thread-safe asyncio task
-    asyncio.run_coroutine_threadsafe(application.update_queue.put(update), application.loop)
-    return jsonify({"status": "ok"})
-
-# ------------------- Set Webhook Manually -------------------
-try:
-    resp = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={WEBHOOK_URL}")
-    print("[INFO] Webhook response:", resp.json())
-except Exception as e:
-    print("[ERROR] Setting webhook failed:", e)
-
+# ------------------- Main -------------------
 if __name__ == "__main__":
-    flask_app.run(host="0.0.0.0", port=PORT)
+    app = build_application()
+    loop = asyncio.get_event_loop()
+    try:
+        print("[INFO] Bot started. Press Ctrl+C to stop.")
+        loop.run_until_complete(app.run_polling())
+    except KeyboardInterrupt:
+        print("[INFO] Bot stopped by user.")
