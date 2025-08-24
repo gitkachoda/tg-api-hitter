@@ -46,7 +46,8 @@ def schedule_delete(chat_id: int, message_id: int):
     def delete_msg():
         try:
             if application:
-                asyncio.run(application.bot.delete_message(chat_id=chat_id, message_id=message_id))
+                loop = asyncio.get_event_loop()
+                loop.create_task(application.bot.delete_message(chat_id=chat_id, message_id=message_id))
         except Exception:
             pass
     Timer(24*60*60, delete_msg).start()
@@ -204,7 +205,8 @@ bot_instance = Bot(BOT_TOKEN)
 def webhook():
     data = request.get_json(force=True)
     update = Update.de_json(data, bot_instance)
-    asyncio.run(application.update_queue.put(update))
+    loop = asyncio.get_event_loop()
+    loop.create_task(application.update_queue.put(update))
     return jsonify({"status": "ok"})
 
 if __name__ == "__main__":
