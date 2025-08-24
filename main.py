@@ -3,28 +3,38 @@ import json
 import tempfile
 import asyncio
 import aiohttp
+import random
 from datetime import datetime
 from dotenv import load_dotenv
-from flask import Flask, request
-from telegram import Update, Bot
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 from threading import Timer
 
 # ------------------- Load Environment -------------------
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", 5000))
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://your-domain.com
+URL_PATH = os.getenv("URL_PATH", BOT_TOKEN)  # webhook path
+
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN missing in environment")
 
 # ------------------- Globals -------------------
 BASE_URL = None
 FIRST_TIME_USERS = set()
 AWAITING_BASEURL = set()
+application = None  # will set in main()
 
-app = Flask(__name__)
-bot = Bot(BOT_TOKEN)
 
-# ------------------- Utility Functions -------------------
+# ------------------- Utility -------------------
 def get_greeting():
     hour = datetime.now().hour
     if 5 <= hour < 12:
@@ -36,78 +46,153 @@ def get_greeting():
     else:
         return "Good Night 🌙"
 
-def schedule_delete(chat_id, message_id):
+
+def schedule_delete(chat_id: int, message_id: int):
     def delete_msg():
         try:
-            bot.delete_message(chat_id=chat_id, message_id=message_id)
-        except:
+            if application is not None:
+                asyncio.run(application.bot.delete_message(chat_id=chat_id, message_id=message_id))
+        except Exception:
             pass
-    Timer(24*60*60, delete_msg).start()
 
-# ------------------- Video Download with Progress -------------------
-async def download_video_with_progress(update, msg_processing, url, local_file):
-    downloaded = 0
-    last_update = -1
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=3600) as r:
-                r.raise_for_status()
-                total_size = int(r.headers.get("Content-Length", 0))
-                with open(local_file, "wb") as f:
-                    async for chunk in r.content.iter_chunked(8192):
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total_size > 0:
-                            progress = int(downloaded / total_size * 100)
-                            if progress != last_update and (progress % 2 == 0 or progress == 100):
-                                await msg_processing.edit_text(f"⏳ Downloading video... {progress}%")
-                                last_update = progress
-        if total_size > 0:
-            await msg_processing.edit_text("⏳ Download complete! 100%")
-    except asyncio.TimeoutError:
-        await msg_processing.edit_text("❌ Video download timed out. Try again.")
-        raise
-    except Exception as e:
-        await msg_processing.edit_text(f"❌ Video download error: {e}")
-        raise
+    Timer(24 * 60 * 60, delete_msg).start()
 
-# ------------------- Telegram Handlers -------------------
+
+def human_size(n: int) -> str:
+    # Friendly bytes -> KB/MB/GB
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if n < 1024:
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.2f} {unit}"
+        n /= 1024
+    return f"{n:.2f} PB"
+
+
+# ------------------- Download with retries (30–35s progress updates) -------------------
+async def download_video_with_progress(msg_processing, url, local_file: str):
+    retries = 3
+
+    for attempt in range(1, retries + 1):
+        downloaded = 0
+        last_percent = -1
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=3600)
+            connector = aiohttp.TCPConnector(limit=0, ssl=False)  # disable SSL verify (CDN quirks)
+            async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+                async with session.get(url) as r:
+                    r.raise_for_status()
+                    total_size = int(r.headers.get("Content-Length", 0))
+
+                    # Telegram hard limit ~2GB (guard if known)
+                    if total_size and total_size > 1_990_000_000:
+                        await msg_processing.edit_text("❌ File too large for Telegram upload (> ~2GB).")
+                        raise RuntimeError("File too large")
+
+                    # time-based throttle: update every 30–35 sec
+                    loop = asyncio.get_event_loop()
+                    now = loop.time()
+                    next_edit_at = now + random.uniform(30, 35)
+
+                    with open(local_file, "wb") as f:
+                        async for chunk in r.content.iter_chunked(8192):
+                            if not chunk:
+                                continue
+                            f.write(chunk)
+                            downloaded += len(chunk)
+
+                            # progress calc
+                            percent = int(downloaded / total_size * 100) if total_size > 0 else None
+
+                            # time to update?
+                            now = loop.time()
+                            if now >= next_edit_at:
+                                try:
+                                    if total_size > 0 and percent is not None:
+                                        # only send if % changed to avoid "message is not modified"
+                                        if percent != last_percent:
+                                            await msg_processing.edit_text(f"⏳ Downloading video... {percent}%")
+                                            last_percent = percent
+                                    else:
+                                        # size unknown – show downloaded bytes
+                                        await msg_processing.edit_text(
+                                            f"⏳ Downloading video... {human_size(downloaded)}"
+                                        )
+                                except Exception:
+                                    pass
+                                # schedule next update window
+                                next_edit_at = now + random.uniform(30, 35)
+
+            # Final completion message
+            try:
+                if total_size > 0:
+                    await msg_processing.edit_text("⏳ Download complete! 100%")
+                else:
+                    await msg_processing.edit_text("⏳ Download complete!")
+            except Exception:
+                pass
+            return  # success
+
+        except Exception as e:
+            if attempt < retries:
+                try:
+                    await msg_processing.edit_text(
+                        f"⚠️ Download failed (try {attempt}/{retries}), retrying in 3s..."
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(3)
+                continue
+            else:
+                try:
+                    await msg_processing.edit_text(f"❌ Video download error: {e}")
+                except Exception:
+                    pass
+                raise
+
+
+# ------------------- Handlers -------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     greeting = get_greeting()
     if user_id not in FIRST_TIME_USERS:
         FIRST_TIME_USERS.add(user_id)
-        desc = f"""{greeting}, welcome! 👋
-
-This bot fetches **Terabox videos**.
-
-1. Set base URL using /baseurl
-2. Send a Terabox link
-3. Videos auto-delete after 1 day
-Use /status or /stop"""
+        desc = (
+            f"{greeting}, welcome! 👋\n\n"
+            "This bot fetches **Terabox videos**.\n\n"
+            "1. Set base URL using /baseurl\n"
+            "2. Send a Terabox link\n"
+            "3. Videos auto-delete after 1 day\n"
+            "Use /status or /stop"
+        )
         await update.message.reply_text(desc)
     else:
         await update.message.reply_text(f"{greeting}, welcome back! Send a Terabox link.")
 
+
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bot is Active ✅")
+
 
 async def baseurl_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     AWAITING_BASEURL.add(user_id)
     await update.message.reply_text("Please enter your base URL:")
 
+
 async def set_baseurl_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BASE_URL
     user_id = update.effective_user.id
-    text = update.message.text.strip()
+    text = (update.message.text or "").strip()
+
     if user_id in AWAITING_BASEURL:
         BASE_URL = text.rstrip("/")
         AWAITING_BASEURL.remove(user_id)
         await update.message.reply_text(f"✅ Base URL set: {BASE_URL}")
         print(f"[LOG] BASE_URL set by {user_id}: {BASE_URL}")
-    else:
-        await handle_message(update, context)
+        return
+
+    await handle_message(update, context)
+
 
 async def stop_baseurl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BASE_URL
@@ -115,9 +200,12 @@ async def stop_baseurl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Base URL cleared.")
     print(f"[LOG] BASE_URL cleared by {update.effective_user.id}")
 
-# ------------------- Video Handling -------------------
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BASE_URL
+    if update.message is None or update.message.text is None:
+        return
+
     user_id = update.effective_user.id
     link = update.message.text.strip()
 
@@ -129,80 +217,76 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"[LOG] Requesting API: {api_url}")
     msg_processing = await update.message.reply_text("⏳ Processing video...")
 
-    # ----- API Request -----
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(api_url, timeout=600) as resp:
-                data = await resp.json()
+        timeout = aiohttp.ClientTimeout(total=600)
+        connector = aiohttp.TCPConnector(limit=0, ssl=False)
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+            async with session.get(api_url) as resp:
+                resp.raise_for_status()
+                data = await resp.json(content_type=None)
         print(f"[LOG] API Response: {json.dumps(data, indent=2)}")
-    except asyncio.TimeoutError:
-        await msg_processing.edit_text("❌ API request timed out. Try again.")
-        return
     except Exception as e:
         await msg_processing.edit_text(f"❌ API request error: {e}")
-        print(f"[ERROR] API request failed for {user_id}: {e}")
         return
 
-    if not data.get("success") or "dlink" not in data:
+    if not data.get("success") or "dlink" not in data or not data["dlink"]:
         await msg_processing.edit_text("❌ Failed to fetch video from API.")
-        print(f"[WARN] API failed for {user_id}")
         return
 
-    dlink = data["dlink"]["dlink"]
-    name = data["dlink"]["name"]
-    size_str = data["dlink"]["size"]
+    d = data["dlink"]
+    dlink = d.get("dlink")
+    name = d.get("name") or "video"
+    size_str = d.get("size") or "unknown size"
 
-    # ----- Video Download -----
+    if not dlink:
+        await msg_processing.edit_text("❌ API did not return a download link.")
+        return
+
     await msg_processing.edit_text("⏳ Downloading video...")
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
         local_file = tmp_file.name
 
     try:
-        await download_video_with_progress(update, msg_processing, dlink, local_file)
+        await download_video_with_progress(msg_processing, dlink, local_file)
     except Exception:
+        if os.path.exists(local_file):
+            os.remove(local_file)
         return
 
-    # ----- Upload Video (directly, no FFmpeg) -----
     await msg_processing.edit_text("⏳ Uploading video...")
     try:
         with open(local_file, "rb") as f:
-            msg = await update.message.reply_video(video=f, caption=f"{name} ({size_str})")
-        schedule_delete(update.effective_chat.id, msg.message_id)
+            sent = await update.message.reply_video(video=f, caption=f"{name} ({size_str})")
+        schedule_delete(update.effective_chat.id, sent.message_id)
         await msg_processing.delete()
-        os.remove(local_file)
-        print(f"[LOG] Video sent and scheduled for deletion for {user_id}")
     except Exception as e:
         await msg_processing.edit_text(f"❌ Upload failed: {e}")
-        os.remove(local_file)
-        print(f"[ERROR] Upload failed for {user_id}: {e}")
+    finally:
+        if os.path.exists(local_file):
+            os.remove(local_file)
 
-# ------------------- Build Bot -------------------
-app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
-app_bot.add_handler(CommandHandler("start", start))
-app_bot.add_handler(CommandHandler("status", status))
-app_bot.add_handler(CommandHandler("baseurl", baseurl_prompt))
-app_bot.add_handler(CommandHandler("stop", stop_baseurl))
-app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, set_baseurl_input))
 
-# ------------------- Flask Webhook -------------------
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    asyncio.run(app_bot.process_update(update))
-    return "ok"
+# ------------------- Build & Run -------------------
+def build_app():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("baseurl", baseurl_prompt))
+    app.add_handler(CommandHandler("stop", stop_baseurl))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, set_baseurl_input))
+    return app
 
-@app.route("/")
-def index():
-    return "Bot is running ✅"
 
-# ------------------- Main -------------------
 if __name__ == "__main__":
+    application = build_app()
+
     if WEBHOOK_URL:
-        async def set_webhook():
-            await bot.set_webhook(f"{WEBHOOK_URL}/{BOT_TOKEN}")
-            print(f"[LOG] Webhook set: {WEBHOOK_URL}/{BOT_TOKEN}")
-        asyncio.run(set_webhook())
-        app.run(host="0.0.0.0", port=PORT)
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=URL_PATH,
+            webhook_url=f"{WEBHOOK_URL}/{URL_PATH}",
+            drop_pending_updates=True,
+        )
     else:
-        print("[LOG] Running locally using polling...")
-        app_bot.run_polling()
+        application.run_polling(drop_pending_updates=True)
