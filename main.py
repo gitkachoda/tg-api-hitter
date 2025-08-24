@@ -15,6 +15,7 @@ from telegram.ext import (
 )
 from threading import Timer
 from flask import Flask, request, jsonify
+import requests
 
 # ------------------- Load Environment -------------------
 load_dotenv()
@@ -205,12 +206,16 @@ bot_instance = Bot(BOT_TOKEN)
 def webhook():
     data = request.get_json(force=True)
     update = Update.de_json(data, bot_instance)
-    loop = asyncio.get_event_loop()
-    loop.create_task(application.update_queue.put(update))
+    # Use thread-safe asyncio task
+    asyncio.run_coroutine_threadsafe(application.update_queue.put(update), application.loop)
     return jsonify({"status": "ok"})
 
+# ------------------- Set Webhook Manually -------------------
+try:
+    resp = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={WEBHOOK_URL}")
+    print("[INFO] Webhook response:", resp.json())
+except Exception as e:
+    print("[ERROR] Setting webhook failed:", e)
+
 if __name__ == "__main__":
-    # Set webhook with Telegram
-    bot_instance.set_webhook(url=WEBHOOK_URL)
-    print(f"[INFO] Webhook set to {WEBHOOK_URL}")
     flask_app.run(host="0.0.0.0", port=PORT)
