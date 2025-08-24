@@ -20,7 +20,7 @@ from threading import Timer
 # ------------------- Load Environment -------------------
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PORT = int(os.getenv("PORT", 5000))
+PORT = int(os.environ.get("PORT", 5000))  # <-- Render ke liye env var
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://your-domain.com
 URL_PATH = os.getenv("URL_PATH", BOT_TOKEN)  # webhook path
 
@@ -59,7 +59,6 @@ def schedule_delete(chat_id: int, message_id: int):
 
 
 def human_size(n: int) -> str:
-    # Friendly bytes -> KB/MB/GB
     for unit in ["B", "KB", "MB", "GB", "TB"]:
         if n < 1024:
             return f"{n:.0f} {unit}" if unit == "B" else f"{n:.2f} {unit}"
@@ -67,62 +66,44 @@ def human_size(n: int) -> str:
     return f"{n:.2f} PB"
 
 
-# ------------------- Download with retries (30–35s progress updates) -------------------
+# ------------------- Download with retries -------------------
 async def download_video_with_progress(msg_processing, url, local_file: str):
     retries = 3
-
     for attempt in range(1, retries + 1):
         downloaded = 0
         last_percent = -1
-
         try:
             timeout = aiohttp.ClientTimeout(total=3600)
-            connector = aiohttp.TCPConnector(limit=0, ssl=False)  # disable SSL verify (CDN quirks)
+            connector = aiohttp.TCPConnector(limit=0, ssl=False)
             async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
                 async with session.get(url) as r:
                     r.raise_for_status()
                     total_size = int(r.headers.get("Content-Length", 0))
-
-                    # Telegram hard limit ~2GB (guard if known)
                     if total_size and total_size > 1_990_000_000:
-                        await msg_processing.edit_text("❌ File too large for Telegram upload (> ~2GB).")
+                        await msg_processing.edit_text("❌ File too large for Telegram (> ~2GB).")
                         raise RuntimeError("File too large")
-
-                    # time-based throttle: update every 30–35 sec
                     loop = asyncio.get_event_loop()
                     now = loop.time()
                     next_edit_at = now + random.uniform(30, 35)
-
                     with open(local_file, "wb") as f:
                         async for chunk in r.content.iter_chunked(8192):
                             if not chunk:
                                 continue
                             f.write(chunk)
                             downloaded += len(chunk)
-
-                            # progress calc
                             percent = int(downloaded / total_size * 100) if total_size > 0 else None
-
-                            # time to update?
                             now = loop.time()
                             if now >= next_edit_at:
                                 try:
                                     if total_size > 0 and percent is not None:
-                                        # only send if % changed to avoid "message is not modified"
                                         if percent != last_percent:
-                                            await msg_processing.edit_text(f"⏳ Downloading video... {percent}%")
+                                            await msg_processing.edit_text(f"⏳ Downloading... {percent}%")
                                             last_percent = percent
                                     else:
-                                        # size unknown – show downloaded bytes
-                                        await msg_processing.edit_text(
-                                            f"⏳ Downloading video... {human_size(downloaded)}"
-                                        )
+                                        await msg_processing.edit_text(f"⏳ Downloading... {human_size(downloaded)}")
                                 except Exception:
                                     pass
-                                # schedule next update window
                                 next_edit_at = now + random.uniform(30, 35)
-
-            # Final completion message
             try:
                 if total_size > 0:
                     await msg_processing.edit_text("⏳ Download complete! 100%")
@@ -130,14 +111,11 @@ async def download_video_with_progress(msg_processing, url, local_file: str):
                     await msg_processing.edit_text("⏳ Download complete!")
             except Exception:
                 pass
-            return  # success
-
+            return
         except Exception as e:
             if attempt < retries:
                 try:
-                    await msg_processing.edit_text(
-                        f"⚠️ Download failed (try {attempt}/{retries}), retrying in 3s..."
-                    )
+                    await msg_processing.edit_text(f"⚠️ Download failed (try {attempt}/{retries}), retrying in 3s...")
                 except Exception:
                     pass
                 await asyncio.sleep(3)
@@ -183,14 +161,12 @@ async def set_baseurl_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BASE_URL
     user_id = update.effective_user.id
     text = (update.message.text or "").strip()
-
     if user_id in AWAITING_BASEURL:
         BASE_URL = text.rstrip("/")
         AWAITING_BASEURL.remove(user_id)
         await update.message.reply_text(f"✅ Base URL set: {BASE_URL}")
         print(f"[LOG] BASE_URL set by {user_id}: {BASE_URL}")
         return
-
     await handle_message(update, context)
 
 
@@ -205,18 +181,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BASE_URL
     if update.message is None or update.message.text is None:
         return
-
     user_id = update.effective_user.id
     link = update.message.text.strip()
-
     if not BASE_URL:
         await update.message.reply_text("❌ Base URL not set. Use /baseurl first.")
         return
-
     api_url = f"{BASE_URL}/api?link={link}"
     print(f"[LOG] Requesting API: {api_url}")
     msg_processing = await update.message.reply_text("⏳ Processing video...")
-
     try:
         timeout = aiohttp.ClientTimeout(total=600)
         connector = aiohttp.TCPConnector(limit=0, ssl=False)
@@ -228,31 +200,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await msg_processing.edit_text(f"❌ API request error: {e}")
         return
-
     if not data.get("success") or "dlink" not in data or not data["dlink"]:
         await msg_processing.edit_text("❌ Failed to fetch video from API.")
         return
-
     d = data["dlink"]
     dlink = d.get("dlink")
     name = d.get("name") or "video"
     size_str = d.get("size") or "unknown size"
-
     if not dlink:
         await msg_processing.edit_text("❌ API did not return a download link.")
         return
-
     await msg_processing.edit_text("⏳ Downloading video...")
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
         local_file = tmp_file.name
-
     try:
         await download_video_with_progress(msg_processing, dlink, local_file)
     except Exception:
         if os.path.exists(local_file):
             os.remove(local_file)
         return
-
     await msg_processing.edit_text("⏳ Uploading video...")
     try:
         with open(local_file, "rb") as f:
@@ -279,7 +245,6 @@ def build_app():
 
 if __name__ == "__main__":
     application = build_app()
-
     if WEBHOOK_URL:
         application.run_webhook(
             listen="0.0.0.0",
