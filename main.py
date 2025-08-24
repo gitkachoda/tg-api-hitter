@@ -4,7 +4,6 @@ import tempfile
 import asyncio
 import aiohttp
 import random
-import string
 from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update
@@ -20,17 +19,9 @@ from threading import Timer
 # ------------------- Load Environment -------------------
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PORT = int(os.environ.get("PORT", 5000))
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://your-domain.com
-URL_PATH = os.getenv("URL_PATH")  # optional
-
+PORT = int(os.environ.get("PORT", 5000))  # Render port
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN missing in environment")
-
-# Generate random URL_PATH if not set
-if not URL_PATH:
-    URL_PATH = "".join(random.choices(string.ascii_letters + string.digits, k=16))
-    print(f"[INFO] URL_PATH not set in .env, using random path: {URL_PATH}")
 
 # ------------------- Globals -------------------
 BASE_URL = None
@@ -137,7 +128,6 @@ async def set_baseurl_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         BASE_URL = text.rstrip("/")
         AWAITING_BASEURL.remove(user_id)
         await update.message.reply_text(f"✅ Base URL set: {BASE_URL}")
-        print(f"[LOG] BASE_URL set by {user_id}: {BASE_URL}")
         return
     await handle_message(update, context)
 
@@ -145,13 +135,11 @@ async def stop_baseurl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BASE_URL
     BASE_URL = None
     await update.message.reply_text("Base URL cleared.")
-    print(f"[LOG] BASE_URL cleared by {update.effective_user.id}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BASE_URL
     if update.message is None or update.message.text is None:
         return
-    user_id = update.effective_user.id
     link = update.message.text.strip()
     if not BASE_URL:
         await update.message.reply_text("❌ Base URL not set. Use /baseurl first.")
@@ -209,17 +197,5 @@ def build_app():
 
 if __name__ == "__main__":
     application = build_app()
-
-    if WEBHOOK_URL:
-        # Webhook mode
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=URL_PATH,
-            webhook_url=f"{WEBHOOK_URL}/{URL_PATH}",
-            drop_pending_updates=True
-        )
-    else:
-        # Polling mode (ensure webhook deleted before using polling)
-        print("[INFO] Running in polling mode. Make sure webhook is deleted first!")
-        application.run_polling(drop_pending_updates=True)
+    print("[INFO] Bot running in polling mode (Render friendly)")
+    application.run_polling(drop_pending_updates=True)
