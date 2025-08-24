@@ -4,9 +4,9 @@ import tempfile
 import asyncio
 import aiohttp
 import random
+import string
 from datetime import datetime
 from dotenv import load_dotenv
-
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -20,21 +20,25 @@ from threading import Timer
 # ------------------- Load Environment -------------------
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PORT = int(os.environ.get("PORT", 5000))  # <-- Render ke liye env var
+PORT = int(os.environ.get("PORT", 5000))
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://your-domain.com
-URL_PATH = os.getenv("URL_PATH", BOT_TOKEN)  # webhook path
+URL_PATH = os.getenv("URL_PATH")  # optional, secure random default below
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN missing in environment")
+
+# Generate random URL_PATH if not set
+if not URL_PATH:
+    URL_PATH = "".join(random.choices(string.ascii_letters + string.digits, k=16))
+    print(f"[INFO] URL_PATH not set in .env, using random path: {URL_PATH}")
 
 # ------------------- Globals -------------------
 BASE_URL = None
 FIRST_TIME_USERS = set()
 AWAITING_BASEURL = set()
-application = None  # will set in main()
+application = None
 
-
-# ------------------- Utility -------------------
+# ------------------- Utility Functions -------------------
 def get_greeting():
     hour = datetime.now().hour
     if 5 <= hour < 12:
@@ -46,7 +50,6 @@ def get_greeting():
     else:
         return "Good Night 🌙"
 
-
 def schedule_delete(chat_id: int, message_id: int):
     def delete_msg():
         try:
@@ -54,22 +57,19 @@ def schedule_delete(chat_id: int, message_id: int):
                 asyncio.run(application.bot.delete_message(chat_id=chat_id, message_id=message_id))
         except Exception:
             pass
-
-    Timer(24 * 60 * 60, delete_msg).start()
-
+    Timer(24*60*60, delete_msg).start()
 
 def human_size(n: int) -> str:
-    for unit in ["B", "KB", "MB", "GB", "TB"]:
+    for unit in ["B","KB","MB","GB","TB"]:
         if n < 1024:
-            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.2f} {unit}"
+            return f"{n:.0f} {unit}" if unit=="B" else f"{n:.2f} {unit}"
         n /= 1024
     return f"{n:.2f} PB"
 
-
-# ------------------- Download with retries -------------------
+# ------------------- Download Function -------------------
 async def download_video_with_progress(msg_processing, url, local_file: str):
     retries = 3
-    for attempt in range(1, retries + 1):
+    for attempt in range(1, retries+1):
         downloaded = 0
         last_percent = -1
         try:
@@ -78,55 +78,38 @@ async def download_video_with_progress(msg_processing, url, local_file: str):
             async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
                 async with session.get(url) as r:
                     r.raise_for_status()
-                    total_size = int(r.headers.get("Content-Length", 0))
+                    total_size = int(r.headers.get("Content-Length",0))
                     if total_size and total_size > 1_990_000_000:
                         await msg_processing.edit_text("❌ File too large for Telegram (> ~2GB).")
                         raise RuntimeError("File too large")
                     loop = asyncio.get_event_loop()
-                    now = loop.time()
-                    next_edit_at = now + random.uniform(30, 35)
-                    with open(local_file, "wb") as f:
+                    next_edit_at = loop.time() + random.uniform(30,35)
+                    with open(local_file,"wb") as f:
                         async for chunk in r.content.iter_chunked(8192):
-                            if not chunk:
-                                continue
+                            if not chunk: continue
                             f.write(chunk)
                             downloaded += len(chunk)
-                            percent = int(downloaded / total_size * 100) if total_size > 0 else None
+                            percent = int(downloaded/total_size*100) if total_size>0 else None
                             now = loop.time()
                             if now >= next_edit_at:
                                 try:
-                                    if total_size > 0 and percent is not None:
+                                    if total_size>0 and percent is not None:
                                         if percent != last_percent:
                                             await msg_processing.edit_text(f"⏳ Downloading... {percent}%")
                                             last_percent = percent
                                     else:
                                         await msg_processing.edit_text(f"⏳ Downloading... {human_size(downloaded)}")
-                                except Exception:
-                                    pass
-                                next_edit_at = now + random.uniform(30, 35)
-            try:
-                if total_size > 0:
-                    await msg_processing.edit_text("⏳ Download complete! 100%")
-                else:
-                    await msg_processing.edit_text("⏳ Download complete!")
-            except Exception:
-                pass
+                                except Exception: pass
+                                next_edit_at = now + random.uniform(30,35)
+            await msg_processing.edit_text("⏳ Download complete! 100%")
             return
         except Exception as e:
             if attempt < retries:
-                try:
-                    await msg_processing.edit_text(f"⚠️ Download failed (try {attempt}/{retries}), retrying in 3s...")
-                except Exception:
-                    pass
                 await asyncio.sleep(3)
                 continue
             else:
-                try:
-                    await msg_processing.edit_text(f"❌ Video download error: {e}")
-                except Exception:
-                    pass
+                await msg_processing.edit_text(f"❌ Video download error: {e}")
                 raise
-
 
 # ------------------- Handlers -------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -134,28 +117,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     greeting = get_greeting()
     if user_id not in FIRST_TIME_USERS:
         FIRST_TIME_USERS.add(user_id)
-        desc = (
-            f"{greeting}, welcome! 👋\n\n"
-            "This bot fetches **Terabox videos**.\n\n"
-            "1. Set base URL using /baseurl\n"
-            "2. Send a Terabox link\n"
-            "3. Videos auto-delete after 1 day\n"
-            "Use /status or /stop"
-        )
+        desc = f"{greeting}, welcome! 👋\n\nThis bot fetches **Terabox videos**.\n\n1. Set base URL using /baseurl\n2. Send a Terabox link\n3. Videos auto-delete after 1 day\nUse /status or /stop"
         await update.message.reply_text(desc)
     else:
         await update.message.reply_text(f"{greeting}, welcome back! Send a Terabox link.")
 
-
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bot is Active ✅")
 
-
 async def baseurl_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    AWAITING_BASEURL.add(user_id)
+    AWAITING_BASEURL.add(update.effective_user.id)
     await update.message.reply_text("Please enter your base URL:")
-
 
 async def set_baseurl_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BASE_URL
@@ -169,13 +141,11 @@ async def set_baseurl_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await handle_message(update, context)
 
-
 async def stop_baseurl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BASE_URL
     BASE_URL = None
     await update.message.reply_text("Base URL cleared.")
     print(f"[LOG] BASE_URL cleared by {update.effective_user.id}")
-
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BASE_URL
@@ -187,7 +157,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Base URL not set. Use /baseurl first.")
         return
     api_url = f"{BASE_URL}/api?link={link}"
-    print(f"[LOG] Requesting API: {api_url}")
     msg_processing = await update.message.reply_text("⏳ Processing video...")
     try:
         timeout = aiohttp.ClientTimeout(total=600)
@@ -196,7 +165,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             async with session.get(api_url) as resp:
                 resp.raise_for_status()
                 data = await resp.json(content_type=None)
-        print(f"[LOG] API Response: {json.dumps(data, indent=2)}")
     except Exception as e:
         await msg_processing.edit_text(f"❌ API request error: {e}")
         return
@@ -211,26 +179,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg_processing.edit_text("❌ API did not return a download link.")
         return
     await msg_processing.edit_text("⏳ Downloading video...")
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
+    with tempfile.NamedTemporaryFile(delete=False,suffix=".mp4") as tmp_file:
         local_file = tmp_file.name
     try:
-        await download_video_with_progress(msg_processing, dlink, local_file)
+        await download_video_with_progress(msg_processing,dlink,local_file)
     except Exception:
-        if os.path.exists(local_file):
-            os.remove(local_file)
+        if os.path.exists(local_file): os.remove(local_file)
         return
     await msg_processing.edit_text("⏳ Uploading video...")
     try:
-        with open(local_file, "rb") as f:
+        with open(local_file,"rb") as f:
             sent = await update.message.reply_video(video=f, caption=f"{name} ({size_str})")
         schedule_delete(update.effective_chat.id, sent.message_id)
         await msg_processing.delete()
     except Exception as e:
         await msg_processing.edit_text(f"❌ Upload failed: {e}")
     finally:
-        if os.path.exists(local_file):
-            os.remove(local_file)
-
+        if os.path.exists(local_file): os.remove(local_file)
 
 # ------------------- Build & Run -------------------
 def build_app():
@@ -242,7 +207,6 @@ def build_app():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, set_baseurl_input))
     return app
 
-
 if __name__ == "__main__":
     application = build_app()
     if WEBHOOK_URL:
@@ -251,7 +215,7 @@ if __name__ == "__main__":
             port=PORT,
             url_path=URL_PATH,
             webhook_url=f"{WEBHOOK_URL}/{URL_PATH}",
-            drop_pending_updates=True,
+            drop_pending_updates=True
         )
     else:
         application.run_polling(drop_pending_updates=True)
