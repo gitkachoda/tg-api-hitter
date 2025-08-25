@@ -5,7 +5,8 @@ import aiohttp
 import random
 from datetime import datetime
 from dotenv import load_dotenv
-from telegram import Update
+from flask import Flask, request
+from telegram import Update, Bot
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -16,7 +17,9 @@ from telegram.ext import (
 
 # ------------------- Load Environment -------------------
 load_dotenv()
-BOT_TOKEN ="8382857845:AAFYydnwKLfUeytMEv54-zGVbddMAOKzLnE"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Render app ka URL dalna
+
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN missing in environment")
 
@@ -24,6 +27,11 @@ if not BOT_TOKEN:
 BASE_URL = None
 FIRST_TIME_USERS = set()
 AWAITING_BASEURL = set()
+
+# ------------------- Flask App -------------------
+app = Flask(__name__)
+bot = Bot(token=BOT_TOKEN)
+application = ApplicationBuilder().token(BOT_TOKEN).build()
 
 # ------------------- Utility Functions -------------------
 def get_greeting():
@@ -183,22 +191,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         if os.path.exists(local_file): os.remove(local_file)
 
-# ------------------- Build Application -------------------
-def build_application():
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("status", status))
-    application.add_handler(CommandHandler("baseurl", baseurl_prompt))
-    application.add_handler(CommandHandler("stop", stop_baseurl))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, set_baseurl_input))
-    return application
+# ------------------- Register Handlers -------------------
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("status", status))
+application.add_handler(CommandHandler("baseurl", baseurl_prompt))
+application.add_handler(CommandHandler("stop", stop_baseurl))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, set_baseurl_input))
+
+# ------------------- Flask Routes -------------------
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), bot)
+    asyncio.run(application.process_update(update))
+    return "ok", 200
+
+@app.route("/")
+def home():
+    return "Bot is running!", 200
 
 # ------------------- Main -------------------
 if __name__ == "__main__":
-    app = build_application()
-    loop = asyncio.get_event_loop()
-    try:
-        print("[INFO] Bot started. Press Ctrl+C to stop.")
-        loop.run_until_complete(app.run_polling())
-    except KeyboardInterrupt:
-        print("[INFO] Bot stopped by user.")
+    # Local testing ke liye polling
+    if os.getenv("LOCAL", "false").lower() == "true":
+        asyncio.run(application.run_polling())
+    else:
+        app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
