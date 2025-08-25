@@ -202,7 +202,8 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, set_base
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
-    asyncio.run(application.process_update(update))
+    # put update into application queue instead of direct process_update
+    application.update_queue.put_nowait(update)
     return "ok", 200
 
 @app.route("/")
