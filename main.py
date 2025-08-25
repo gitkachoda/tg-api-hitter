@@ -3,6 +3,7 @@ import tempfile
 import asyncio
 import aiohttp
 import random
+import threading
 from datetime import datetime
 from dotenv import load_dotenv
 from flask import Flask, request
@@ -202,7 +203,6 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, set_base
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
-    # put update into application queue instead of direct process_update
     application.update_queue.put_nowait(update)
     return "ok", 200
 
@@ -210,10 +210,12 @@ def webhook():
 def home():
     return "Bot is running!", 200
 
+# ------------------- Start PTB in background -------------------
+def run_ptb():
+    asyncio.run(application.run_polling(stop_signals=None))  # event loop always alive
+
+threading.Thread(target=run_ptb, daemon=True).start()
+
 # ------------------- Main -------------------
 if __name__ == "__main__":
-    # Local testing ke liye polling
-    if os.getenv("LOCAL", "false").lower() == "true":
-        asyncio.run(application.run_polling())
-    else:
-        app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
