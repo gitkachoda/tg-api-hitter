@@ -1,0 +1,5 @@
+python-telegram-bot>=20.3,<21
+aiohttp==3.9.5
+python-dotenv==1.0.1
+flask==3.0.3
+requests
